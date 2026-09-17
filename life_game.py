@@ -15,6 +15,7 @@ FPS    = 30
 T_WATER   = 0
 T_GRASS   = 1
 T_SHALLOW = 2
+T_DESERT  = 3   # barren land – animals ok, plants do NOT grow
 
 # Entity kinds
 E_NONE     = 0
@@ -46,6 +47,9 @@ COL_GRASS_LIGHT  = ( 59, 124,  73)
 COL_SAND_DARK    = (168, 150, 104)
 COL_SAND_LIGHT   = (186, 170, 124)
 
+COL_DESERT_DARK    = (185, 145,  90)
+COL_DESERT_LIGHT   = (205, 170, 110)
+
 COL_PLANT_DARK   = ( 35, 160,  70)
 COL_PLANT_LIGHT  = ( 82, 215, 105)
 
@@ -73,6 +77,12 @@ GRASS_SHADES = [
 SAND_SHADES = [
     COL_SAND_DARK,
     COL_SAND_LIGHT,
+]
+
+DESERT_SHADES = [
+    COL_DESERT_DARK,
+    COL_DESERT_LIGHT,
+    (195, 158, 100),
 ]
 
 
@@ -110,10 +120,10 @@ def lerp_color(a, b, t):
 
 # ─── TERRAIN GENERATION (simple blob noise) ──────────────────────────────────
 def generate_terrain():
-    """Create a random terrain with water blobs using seeded random walks."""
+    """Create a random terrain with water blobs, shallow coast, and desert areas."""
     terrain = [[T_GRASS] * GRID_W for _ in range(GRID_H)]
 
-    # drop random water "seeds" and grow them
+    # ── water blobs ─────────────────────────────────────────────────────────
     n_blobs = random.randint(5, 10)
     for _ in range(n_blobs):
         sx = random.randint(2, GRID_W - 3)
@@ -128,7 +138,7 @@ def generate_terrain():
             if in_grid(x, y):
                 terrain[y][x] = T_WATER
 
-    # add some shallow water adjacent to water
+    # ── shallow water adjacent to deep water ───────────────────────────────
     for y in range(GRID_H):
         for x in range(GRID_W):
             if terrain[y][x] == T_GRASS:
@@ -139,6 +149,32 @@ def generate_terrain():
 
                 if wn >= 2 and random.random() < 0.5:
                     terrain[y][x] = T_SHALLOW
+
+    # ── desert blobs on grass only ─────────────────────────────────────────
+    n_deserts = random.randint(3, 6)
+    for _ in range(n_deserts):
+        # Try to find a grass seed cell.
+        attempts = 0
+        while attempts < 25:
+            sx = random.randint(2, GRID_W - 3)
+            sy = random.randint(2, GRID_H - 3)
+
+            if terrain[sy][sx] == T_GRASS:
+                break
+
+            attempts += 1
+        else:
+            continue
+
+        radius = random.randint(2, 5)
+        size   = random.randint(15, 35)
+
+        for _ in range(size):
+            x = sx + random.randint(-radius, radius)
+            y = sy + random.randint(-radius, radius)
+
+            if in_grid(x, y) and terrain[y][x] == T_GRASS:
+                terrain[y][x] = T_DESERT
 
     return terrain
 
@@ -163,6 +199,10 @@ class World:
         self.entities = {}          # (x,y) → Entity
         self.ticks = 0
         self.counts = {E_PLANT: 0, E_HERB: 0, E_CARN: 0}
+
+        # Death skull effects.
+        self.skulls = []            # [x, y, kind, age, max_age]
+        self._skull_sprites = None  # cache: (kind, alpha_level) → Surface
 
         # Rendering helpers
         self._terrain_surf = None
@@ -190,6 +230,10 @@ class World:
                             self.shallow_coast.add((x, y))
                             break
 
+                elif t == T_DESERT:
+                    # Desert is rendered directly; no extra visual sand needed.
+                    pass
+
                 else:  # grass
                     # Visual-only sandy coastline. This does not change simulation rules;
                     # it only makes coastal grass look like beach/sand.
@@ -206,7 +250,7 @@ class World:
 
     # ── initial population ──────────────────────────────────────────────────
     def _seed_pop(self):
-        # scatter plants
+        # scatter plants on grass only; desert does not grow plants.
         for _ in range(200):
             x, y = random.randint(0, GRID_W - 1), random.randint(0, GRID_H - 1)
             if self.terrain[y][x] == T_GRASS and self.grid[y][x] == E_NONE:
@@ -241,6 +285,18 @@ class World:
         for e in self.entities.values():
             self.counts[e.kind] = self.counts.get(e.kind, 0) + 1
 
+    def _add_skull(self, x, y, kind):
+        """Add a temporary skull effect for a dead animal."""
+        if kind not in (E_HERB, E_CARN):
+            return
+
+        max_age = random.randint(30, 60)
+        self.skulls.append([x, y, kind, 0, max_age])
+
+        # Avoid unbounded growth if many animals die at once.
+        if len(self.skulls) > 300:
+            del self.skulls[:len(self.skulls) - 300]
+
     # ── can an entity stand on a cell? ──────────────────────────────────────
     def _can_stand(self, x, y, kind):
         t = self.terrain[y][x]
@@ -251,12 +307,19 @@ class World:
         if t == T_SHALLOW:
             return kind == E_HERB              # carnivores blocked, herbivores ok
 
-        return True                            # grass
+        # Grass and desert are both walkable.
+        return True
 
 
     # ── ONE SIMULATION TICK ─────────────────────────────────────────────────
     def tick(self):
         self.ticks += 1
+
+        # Age skull effects at the start of each tick.
+        for s in self.skulls:
+            s[3] += 1
+
+        self.skulls = [s for s in self.skulls if s[3] < s[4]]
 
         to_remove = []
         to_spawn  = []          # (x, y, kind, hp)
@@ -293,9 +356,15 @@ class World:
                 for nx, ny in neighbours4(x, y):
                     if (nx, ny) in self.entities:
                         ne = self.entities[(nx, ny)]
+
                         if ne.kind == target:
                             # eat!
                             e.hp = min(e.hp + gain, SPLIT_HP)
+
+                            # If the eaten target was an animal, leave a skull.
+                            if ne.kind in (E_HERB, E_CARN):
+                                self._add_skull(nx, ny, ne.kind)
+
                             self._remove(nx, ny)
                             eaten = True
                             break
@@ -330,6 +399,10 @@ class World:
             if e.hp <= 0:
                 to_remove.append((e.x, e.y))
 
+                # Leave a skull for dead animals.
+                if e.kind in (E_HERB, E_CARN):
+                    self._add_skull(e.x, e.y, e.kind)
+
         # apply removals & spawns
         for (x, y) in to_remove:
             if (x, y) in self.entities:
@@ -339,7 +412,7 @@ class World:
             if (x, y) not in self.entities and self._can_stand(x, y, kind):
                 self._place(x, y, kind, hp, SPLIT_HP)
 
-        # ── PLANT GROWTH (new plants appear on empty grass) ─────────────────
+        # ── PLANT GROWTH (new plants appear on empty grass only, not desert) ─
         for _ in range(6):
             x = random.randint(0, GRID_W - 1)
             y = random.randint(0, GRID_H - 1)
@@ -365,6 +438,9 @@ class World:
                 elif t == T_SHALLOW:
                     c = COL_SHALLOW_BASE
 
+                elif t == T_DESERT:
+                    c = DESERT_SHADES[(x * 13 + y * 5) % len(DESERT_SHADES)]
+
                 else:  # grass, possibly visually sandy near the coast
                     if (x, y) in self.sand_cells:
                         c = SAND_SHADES[(x * 7 + y * 13) % len(SAND_SHADES)]
@@ -381,6 +457,68 @@ class World:
             self._shadow_surf = s
 
         return self._shadow_surf
+
+    def _get_skull_sprite(self, kind, alpha_level):
+        """Return a cached faded skull sprite for the given alpha level."""
+        if self._skull_sprites is None:
+            self._skull_sprites = {}
+
+        key = (kind, alpha_level)
+        sprite = self._skull_sprites.get(key)
+
+        if sprite is None:
+            alpha = int(255 * (alpha_level / 15))
+            sprite = self._make_skull_sprite(kind, alpha)
+            self._skull_sprites[key] = sprite
+
+        return sprite
+
+    def _make_skull_sprite(self, kind, alpha):
+        """Create a small skull sprite with the given alpha."""
+        s = pygame.Surface((CELL, CELL), pygame.SRCALPHA)
+
+        if kind == E_HERB:
+            bone = (235, 218, 170, alpha)
+        elif kind == E_CARN:
+            bone = (235, 180, 170, alpha)
+        else:
+            bone = (235, 230, 215, alpha)
+
+        dark = (45, 40, 50, alpha)
+
+        # Head.
+        pygame.draw.circle(s, bone, (CELL // 2, 5), 4)
+
+        # Jaw / teeth base.
+        pygame.draw.rect(s, bone, (3, 8, 6, 2), border_radius=1)
+
+        # Eye sockets.
+        pygame.draw.circle(s, dark, (4, 5), 1)
+        pygame.draw.circle(s, dark, (8, 5), 1)
+
+        # Nose / mouth.
+        pygame.draw.rect(s, dark, (6, 7, 1, 2))
+
+        # Teeth gaps.
+        pygame.draw.rect(s, dark, (4, 9, 1, 1))
+        pygame.draw.rect(s, dark, (7, 9, 1, 1))
+
+        return s
+
+    def _draw_skull(self, surf, skull):
+        x, y, kind, age, max_age = skull
+
+        if age >= max_age:
+            return
+
+        frac = 1.0 - (age / float(max_age))
+        alpha_level = int(max(0, min(15, frac * 15)))
+
+        if alpha_level <= 0:
+            return
+
+        sprite = self._get_skull_sprite(kind, alpha_level)
+        surf.blit(sprite, (x * CELL, y * CELL))
 
     def _draw_water_animation(self, surf, t):
         # Deep water shimmer.
@@ -555,11 +693,16 @@ class World:
         # Subtle frame around the simulation area.
         pygame.draw.rect(surf, (10, 14, 22), (0, 0, WIDTH, GRID_H * CELL), width=2)
 
-        # Draw plants first, then animals on top.
+        # Draw plants first.
         for e in self.entities.values():
             if e.kind == E_PLANT:
                 self._draw_plant(surf, e, anim_t)
 
+        # Draw skulls above plants but below living animals.
+        for s in self.skulls:
+            self._draw_skull(surf, s)
+
+        # Draw animals last.
         for e in self.entities.values():
             if e.kind == E_HERB:
                 self._draw_herb(surf, e)
