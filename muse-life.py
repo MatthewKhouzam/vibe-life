@@ -23,9 +23,10 @@ CARN_SPEED = 2.0
 FLEE_DIST = 150
 CHASE_DIST = 200
 SEEK_DIST = 150
-EAT_DIST = 12
 ANIMAL_RADIUS = 8
 COLLISION_DIST = ANIMAL_RADIUS * 2
+EAT_DIST = COLLISION_DIST + 1
+
 
 def dist(a,b):
     return math.hypot(a.x - b.x, a.y - b.y)
@@ -125,25 +126,33 @@ class Herbivore(Animal):
                 nearest_carn = c
         if nearest_carn and nearest_carn_d < FLEE_DIST:
             self.move_away(nearest_carn.x, nearest_carn.y)
-            return
-
-        # seek mature plant
-        nearest_plant = None
-        nearest_plant_d = float('inf')
-        for p in plants:
-            if not p.mature: continue
-            d = dist(self, p)
-            if d < nearest_plant_d:
-                nearest_plant_d = d
-                nearest_plant = p
-        if nearest_plant and nearest_plant_d < SEEK_DIST:
-            self.move_towards(nearest_plant.x, nearest_plant.y)
-            if nearest_plant_d < EAT_DIST:
-                self.health += 35
-                return nearest_plant  # signal eat
+            # still can eat if already adjacent
         else:
-            self.wander()
+            # seek mature plant
+            nearest_plant = None
+            nearest_plant_d = float('inf')
+            for p in plants:
+                if not p.mature: continue
+                d = dist(self, p)
+                if d < nearest_plant_d:
+                    nearest_plant_d = d
+                    nearest_plant = p
+            if nearest_plant and nearest_plant_d < SEEK_DIST:
+                self.move_towards(nearest_plant.x, nearest_plant.y)
+            else:
+                self.wander()
+
+        # eat any adjacent mature plant
+        for p in plants:
+            if p.mature and dist(self, p) < EAT_DIST:
+                self.health += 35
+                return p  # signal eat
         return None
+
+class Carnivore(Animal):
+    def __init__(self):
+        super().__init__(random.randint(10,WIDTH-10), random.randint(10,HEIGHT-10),
+                         RED, CARN_SPEED, 120)
 
 class Carnivore(Animal):
     def __init__(self):
@@ -162,12 +171,16 @@ class Carnivore(Animal):
                 nearest_h = h
         if nearest_h and nearest_h_d < CHASE_DIST:
             self.move_towards(nearest_h.x, nearest_h.y)
-            if nearest_h_d < EAT_DIST:
-                self.health += 45
-                return nearest_h  # signal eat
         else:
             self.wander()
+
+        # eat any adjacent herbivore
+        for h in herbivores:
+            if dist(self, h) < EAT_DIST:
+                self.health += 45
+                return h  # signal eat
         return None
+
 
 def main():
     pygame.init()
