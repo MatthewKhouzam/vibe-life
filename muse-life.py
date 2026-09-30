@@ -1,4 +1,8 @@
-import pygame, random, math
+import math
+import random
+
+import pygame
+
 """
 Make me a simulation game in pygame. it is a game of life. This game will play out with 3 types of entities. Plants, herbivores and carnivores. A plant will grow until eaten. A herbivore and carivore will start with high health, when it eats, it gains health. Every turn causes it to lose health. At 0 hp they die. Carnivores gain HP by eating herbivores. Herbivores gain HP by eating plants. Herbivores run away from carnivores. Carnivores run towards herbivores to eat them.
 1m 39
@@ -20,9 +24,25 @@ FLEE_DIST = 150
 CHASE_DIST = 200
 SEEK_DIST = 150
 EAT_DIST = 12
+ANIMAL_RADIUS = 8
+COLLISION_DIST = ANIMAL_RADIUS * 2
 
 def dist(a,b):
     return math.hypot(a.x - b.x, a.y - b.y)
+
+def resolve_collision(a, b, min_dist):
+    d = dist(a, b)
+    if d < min_dist and d > 0:
+        overlap = min_dist - d
+        angle = math.atan2(b.y - a.y, b.x - a.x)
+        push = overlap / 2
+        a.x -= math.cos(angle) * push
+        a.y -= math.sin(angle) * push
+        b.x += math.cos(angle) * push
+        b.y += math.sin(angle) * push
+    elif d == 0:
+        a.x += random.uniform(-1,1)
+        a.y += random.uniform(-1,1)
 
 class Plant:
     def __init__(self):
@@ -182,9 +202,8 @@ def main():
         # update herbivores
         for h in herbivores[:]:
             eaten = h.update(plants, carnivores)
-            if eaten:
-                if eaten in plants:
-                    plants.remove(eaten)
+            if eaten and eaten in plants:
+                plants.remove(eaten)
             h.draw(screen)
             if h.health <= 0:
                 herbivores.remove(h)
@@ -192,12 +211,21 @@ def main():
         # update carnivores
         for c in carnivores[:]:
             eaten = c.update(herbivores)
-            if eaten:
-                if eaten in herbivores:
-                    herbivores.remove(eaten)
+            if eaten and eaten in herbivores:
+                herbivores.remove(eaten)
             c.draw(screen)
             if c.health <= 0:
                 carnivores.remove(c)
+
+        # collision detection between animals
+        for i, a1 in enumerate(herbivores):
+            for a2 in herbivores[i+1:]:
+                resolve_collision(a1, a2, COLLISION_DIST)
+            for c in carnivores:
+                resolve_collision(a1, c, COLLISION_DIST)
+        for i, c1 in enumerate(carnivores):
+            for c2 in carnivores[i+1:]:
+                resolve_collision(c1, c2, COLLISION_DIST)
 
         # UI
         txt = f"Plants: {len(plants)}  Herbivores: {len(herbivores)}  Carnivores: {len(carnivores)}"
